@@ -1,0 +1,145 @@
+{
+  "employees": [
+    {
+      "id": "1",
+      "name": "Jan",
+      "pin": "1111",
+      "role": "Pracownik",
+      "shift_no": 1
+    },
+    {
+      "id": "2",
+      "name": "Anna",
+      "pin": "2222",
+      "role": "Pracownik",
+      "shift_no": 2
+    },
+    {
+      "id": "3",
+      "name": "Hola",
+      "pin": "2345",
+      "role": "Kierowca",
+      "shift_no": null
+    },
+    {
+      "id": "4",
+      "name": "645",
+      "pin": "5666",
+      "role": "Pracownik",
+      "shift_no": null
+    },
+    {
+      "id": "5",
+      "name": "5gdfh",
+      "pin": "5346",
+      "role": "Prezes",
+      "shift_no": null
+    },
+    {
+      "id": "6",
+      "name": "efs",
+      "pin": "3333",
+      "role": "Pracownik",
+      "shift_no": null
+    },
+    {
+      "id": "7",
+      "name": "jdagh",
+      "pin": "8765",
+      "role": "Pracownik",
+      "shift_no": 1
+    }
+  ],
+  "shifts": [
+    {
+      "id": "1",
+      "employee_id": 1,
+      "started_at": "...",
+      "ended_at": null
+    },
+    {
+      "id": "8fdf",
+      "employee_id": 2,
+      "started_at": "2025-09-13T20:21:06.805",
+      "ended_at": "2025-09-15T14:56:58.600"
+    },
+    {
+      "id": "441a",
+      "employee_id": 1,
+      "started_at": "2025-09-13T20:21:26.266",
+      "ended_at": "2025-09-15T15:07:12.147"
+    },
+    {
+      "id": "565d",
+      "employee_id": 3,
+      "started_at": "2025-09-13T20:22:22.758",
+      "ended_at": "2025-09-15T15:07:22.141"
+    },
+    {
+      "id": "1a2e",
+      "employee_id": 6,
+      "started_at": "2025-09-15T14:48:59.783",
+      "ended_at": "2025-09-15T14:57:29.276"
+    },
+    {
+      "id": "411f",
+      "employee_id": 6,
+      "started_at": "2025-09-15T15:06:58.765",
+      "ended_at": "2025-09-15T15:07:17.167"
+    }
+  ],
+  "roles": [
+    {
+      "id": "1",
+      "name": "Pracownik"
+    },
+    {
+      "id": "2",
+      "name": "Prezes"
+    },
+    {
+      "id": "3",
+      "name": "Kierowca"
+    }
+  ],
+  "work_shifts": [
+    {
+      "id": "1",
+      "no": 1
+    },
+    {
+      "id": "2",
+      "no": 2
+    }
+  ],
+  "absences": [
+    {
+      "id": "1",
+      "employee_id": 4,
+      "type": "URLOP",
+      "start_date": "2025-09-10T00:00:00.000",
+      "end_date": "2025-09-16T00:00:00.000"
+    },
+    {
+      "id": "2",
+      "employee_id": 3,
+      "type": "URLOP",
+      "start_date": "2025-09-05T00:00:00.000",
+      "end_date": "2025-09-23T00:00:00.000"
+    },
+    {
+      "id": "3",
+      "employee_id": 1,
+      "type": "URLOP",
+      "start_date": "2025-09-23T00:00:00.000",
+      "end_date": "2025-10-05T00:00:00.000"
+    },
+    {
+      "id": "4",
+      "employee_id": 2,
+      "type": "URLOP",
+      "start_date": "2025-09-17T00:00:00.000",
+      "end_date": "2025-09-17T00:00:00.000"
+    }
+  ]
+}
