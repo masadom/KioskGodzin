@@ -1,182 +1,372 @@
-// gateway.js — proxy + auth (bez require('json-server'))
+// gateway.js
+// Kiosk rejestracji czasu – lekki backend API (Express + plikowa "baza")
+// JSON-only: brak HTML'owych odpowiedzi na /api (404/500 również w JSON)
+
 require('dotenv').config();
+
+const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
+const morgan = require('morgan');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
-const { createProxyMiddleware } = require('http-proxy-middleware');
-const fs = require('fs');
-const path = require('path');
-
-// dynamiczny import node-fetch (działa w CJS)
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-const PORT = process.env.PORT || 3100;
-const UPSTREAM = process.env.UPSTREAM || 'http://127.0.0.1:3000';
-const JWT_SECRET = process.env.JWT_SECRET || 'change_me';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+// ====== Konfiguracja ======
+const PORT = Number(process.env.PORT || 3000);
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-.env';
+const DB_PATH = path.join(__dirname, 'db.json');
+const ADMIN_PATH = path.join(__dirname, '.admin.json');
 
-// ───────────── Trwałe hasło admina (.admin.json) ─────────────
-const ADMIN_STORE = path.join(__dirname, '.admin.json');
-let adminPasswordHash = null;
-
-function safeReadJson(file) {
+// ====== Narzędzia plikowe (bezpieczne JSON) ======
+function readJsonSafe(filePath, fallback = {}) {
   try {
-    if (!fs.existsSync(file)) return null;
-    const txt = fs.readFileSync(file, 'utf8').trim();
-    if (!txt) return null;
-    return JSON.parse(txt);
-  } catch {
-    return null;
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn(`readJsonSafe(${path.basename(filePath)}): ${e.message}`);
+    return fallback;
   }
 }
 
-(async () => {
-  try {
-    const data = safeReadJson(ADMIN_STORE);
-    if (data && data.passwordHash) {
-      adminPasswordHash = data.passwordHash;
-      console.log('✓ Admin password loaded from .admin.json');
-    } else {
-      const hash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-      fs.writeFileSync(ADMIN_STORE, JSON.stringify({ passwordHash: hash }, null, 2), 'utf8');
-      adminPasswordHash = hash;
-      console.log('✓ Admin password initialized from .env and saved to .admin.json');
-    }
-  } catch (e) {
-    console.error('Admin password init error (fallback to .env):', e);
-    adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+function writeJsonSafe(filePath, dataObj) {
+    // zapis atomowy
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(dataObj, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+}
+
+// ====== Inicjalizacja bazy ======
+function ensureDb() {
+  const db = readJsonSafe(DB_PATH, null);
+  if (!db || typeof db !== 'object') {
+    const seed = {
+      employees: [],      // { id, name, cardUid, active }
+      events: [],         // { id, employeeId, type:'in'|'out', ts }
+      nextEmployeeId: 1,
+      nextEventId: 1
+    };
+    writeJsonSafe(DB_PATH, seed);
+    return seed;
   }
-})();
+  // Dopelnij brakujące pola po starych wersjach
+  db.employees ||= [];
+  db.events ||= [];
+  db.nextEmployeeId = Number.isInteger(db.nextEmployeeId) ? db.nextEmployeeId : 1;
+  db.nextEventId = Number.isInteger(db.nextEventId) ? db.nextEventId : 1;
+  return db;
+}
+
+function ensureAdmin() {
+  const adm = readJsonSafe(ADMIN_PATH, null);
+  if (!adm || !adm.passwordHash) {
+    const init = { passwordHash: '', updatedAt: new Date().toISOString() };
+    const initPw = process.env.ADMIN_INIT_PASSWORD;
+    if (initPw && initPw.length >= 4) {
+      init.passwordHash = bcrypt.hashSync(initPw, 10);
+      console.log('[admin] Utworzono haslo admina z ADMIN_INIT_PASSWORD (.env).');
+    } else {
+      // Jeśli nie podano hasła: ustaw "admin" (tylko na dev) i ostrzeż
+      init.passwordHash = bcrypt.hashSync('admin', 10);
+      console.warn('[admin] Brak ADMIN_INIT_PASSWORD – ustawiono tymczasowe haslo "admin". Zmien w panelu natychmiast!');
+    }
+    writeJsonSafe(ADMIN_PATH, init);
+    return init;
+  }
+  return adm;
+}
+
+let DB = ensureDb();
+let ADMIN = ensureAdmin();
+
+// ====== Middleware globalne ======
+app.disable('x-powered-by');
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
+app.use(morgan('tiny'));
+
+// Wymuś JSON dla wszystkich odpowiedzi pod /api (także 404/500)
+app.use('/api', (req, res, next) => {
+  res.type('application/json; charset=utf-8');
+  next();
+});
+// JSON-only również pod /admin (alias dla starszych/innnych zakładek frontu)
+app.use('/admin', (req, res, next) => {
+  res.type('application/json; charset=utf-8');
+  next();
+});
 
 
-// ───────────── Auth helpers (MUSZĄ BYĆ PRZED ROUTAMI) ─────────────
-function issueToken() {
-  return jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+
+
+// ====== Helpery ======
+function signToken(payload, expiresIn = '2d') {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn });
 }
 
 function authMiddleware(req, res, next) {
-  const h = req.headers.authorization || '';
-  const [, token] = h.split(' ');
-  if (!token) return res.status(401).json({ error: 'No token' });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid token' });
+    const hdr = req.headers['authorization'] || '';
+    const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+    if (!token) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
 }
 
-// ───────────── ROUTES: AUTH ─────────────
-app.post('/auth/login', async (req, res) => {
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ ok: false, error: 'Forbidden' });
+  }
+  next();
+}
+
+// ====== API – zdrowie ======
+app.get('/api/ping', (req, res) => {
+  res.status(200).json({ ok: true, time: new Date().toISOString() });
+});
+
+// ====== API – Admin: login, zmiana hasla ======
+app.post('/api/admin/login', (req, res) => {
   const { password } = req.body || {};
-  if (!password) return res.status(400).json({ error: 'Missing password' });
-  const ok = await bcrypt.compare(password, adminPasswordHash);
-  if (!ok) return res.status(401).json({ error: 'Bad credentials' });
-  return res.json({ token: issueToken() });
+  if (typeof password !== 'string' || !password.length) {
+    return res.status(400).json({ ok: false, error: 'PasswordRequired' });
+  }
+  ADMIN = readJsonSafe(ADMIN_PATH, ADMIN);
+  const valid = bcrypt.compareSync(password, ADMIN.passwordHash || '');
+  if (!valid) {
+    return res.status(401).json({ ok: false, error: 'InvalidCredentials' });
+  }
+  const token = signToken({ role: 'admin' }, '8h');
+  res.status(200).json({ ok: true, token });
 });
 
-// ZMIANA HASŁA (wymaga tokena)
-app.post('/auth/change-password', authMiddleware, async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body || {};
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Missing currentPassword/newPassword' });
-    }
-    if (typeof newPassword !== 'string' || newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters' });
-    }
-    const ok = await bcrypt.compare(currentPassword, adminPasswordHash);
-    if (!ok) return res.status(401).json({ error: 'Current password is incorrect' });
-
-    const newHash = await bcrypt.hash(newPassword, 10);
-    fs.writeFileSync(ADMIN_STORE, JSON.stringify({ passwordHash: newHash }, null, 2), 'utf8');
-    adminPasswordHash = newHash;
-
-    return res.status(200).json({ success: true });
-  } catch (e) {
-    console.error('change-password error', e);
-    return res.status(500).json({ error: 'Change password failed' });
+app.post('/api/admin/password', authMiddleware, requireAdmin, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!newPassword || String(newPassword).length < 4) {
+    return res.status(400).json({ ok: false, error: 'WeakPassword', message: 'Min 4 znaki.' });
   }
+  ADMIN = readJsonSafe(ADMIN_PATH, ADMIN);
+  const valid = bcrypt.compareSync(currentPassword || '', ADMIN.passwordHash || '');
+  if (!valid) return res.status(401).json({ ok: false, error: 'InvalidCredentials' });
+
+  ADMIN.passwordHash = bcrypt.hashSync(String(newPassword), 10);
+  ADMIN.updatedAt = new Date().toISOString();
+  writeJsonSafe(ADMIN_PATH, ADMIN);
+  res.status(200).json({ ok: true });
 });
 
-// ───────────── Walidacje ─────────────
-async function hasActiveShift(employeeId) {
-  const r = await fetch(`${UPSTREAM}/shifts?employee_id=${employeeId}&ended_at=null`);
-  if (!r.ok) return false;
-  const list = await r.json();
-  return Array.isArray(list) && list.length > 0;
-}
+// ====== API – Admin: pracownicy CRUD ======
+app.get('/api/admin/employees', authMiddleware, requireAdmin, (req, res) => {
+  DB = readJsonSafe(DB_PATH, DB);
+  res.status(200).json({
+    ok: true,
+    data: DB.employees.map(e => ({
+      id: e.id,
+      name: e.name,
+      cardUid: e.cardUid,
+      active: e.active !== false
+    }))
+  });
+});
 
-async function validateShiftStart(req, res, next) {
-  try {
-    if (req.method !== 'POST' || !req.path.startsWith('/shifts')) return next();
-    const body = req.body || {};
-    if (!body.employee_id || !body.started_at) return next();
-    const active = await hasActiveShift(body.employee_id);
-    if (active && (body.ended_at == null)) {
-      return res.status(400).json({ error: 'Employee already has an active shift.' });
-    }
-    next();
-  } catch (e) {
-    console.error('validateShiftStart error', e);
-    next();
+app.post('/api/admin/employees', authMiddleware, requireAdmin, (req, res) => {
+  const { name, cardUid, active = true } = req.body || {};
+  if (!name || !cardUid) {
+    return res.status(400).json({ ok: false, error: 'ValidationError', message: 'Wymagane: name, cardUid' });
   }
-}
+  DB = readJsonSafe(DB_PATH, DB);
+  const exists = DB.employees.find(e => e.cardUid === String(cardUid));
+  if (exists) return res.status(409).json({ ok: false, error: 'CardUidExists' });
 
-async function validateEmployeePin(req, res, next) {
-  try {
-    if (!req.path.startsWith('/employees') || !['POST', 'PATCH', 'PUT'].includes(req.method)) {
-      return next();
-    }
-    const body = req.body || {};
-    if (!body.pin) return next();
+  const emp = {
+    id: DB.nextEmployeeId++,
+    name: String(name),
+    cardUid: String(cardUid),
+    active: !!active
+  };
+  DB.employees.push(emp);
+  writeJsonSafe(DB_PATH, DB);
+  res.status(201).json({ ok: true, data: emp });
+});
 
-    const r = await fetch(`${UPSTREAM}/employees?pin=${encodeURIComponent(body.pin)}`);
-    const list = await r.json();
+app.put('/api/admin/employees/:id', authMiddleware, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const { name, cardUid, active } = req.body || {};
+  DB = readJsonSafe(DB_PATH, DB);
 
-    if (req.method === 'PATCH' || req.method === 'PUT') {
-      const m = req.path.match(/^\/employees\/(.+)$/);
-      const currentId = m ? m[1] : null;
-      const dup = Array.isArray(list) ? list.find(e => String(e.id) !== String(currentId)) : null;
-      if (dup) return res.status(400).json({ error: 'PIN already used' });
-    } else {
-      if (Array.isArray(list) && list.length > 0) {
-        return res.status(400).json({ error: 'PIN already used' });
-      }
-    }
-    next();
-  } catch (e) {
-    console.error('validateEmployeePin error', e);
-    next();
+  const idx = DB.employees.findIndex(e => e.id === id);
+  if (idx === -1) return res.status(404).json({ ok: false, error: 'NotFound' });
+
+  if (cardUid) {
+    const dup = DB.employees.find(e => e.cardUid === String(cardUid) && e.id !== id);
+    if (dup) return res.status(409).json({ ok: false, error: 'CardUidExists' });
   }
-}
 
-// ───────────── Publiczne (bez tokena) ─────────────
-app.get('/employees', createProxyMiddleware({ target: UPSTREAM, changeOrigin: true }));
-app.get('/employees/:id', createProxyMiddleware({ target: UPSTREAM, changeOrigin: true }));
+  const emp = DB.employees[idx];
+  if (typeof name === 'string') emp.name = name;
+  if (typeof cardUid === 'string') emp.cardUid = cardUid;
+  if (typeof active === 'boolean') emp.active = active;
+  DB.employees[idx] = emp;
 
-// ───────────── Chronione proxy ─────────────
-app.use('/shifts', authMiddleware, validateShiftStart, createProxyMiddleware({
-  target: UPSTREAM, changeOrigin: true,
-}));
-app.use('/employees', authMiddleware, validateEmployeePin, createProxyMiddleware({
-  target: UPSTREAM, changeOrigin: true,
-}));
-app.use('/absences', authMiddleware, createProxyMiddleware({
-  target: UPSTREAM, changeOrigin: true,
-}));
-app.use('/roles', authMiddleware, createProxyMiddleware({
-  target: UPSTREAM, changeOrigin: true,
-}));
-app.use('/work_shifts', authMiddleware, createProxyMiddleware({
-  target: UPSTREAM, changeOrigin: true,
-}));
+  writeJsonSafe(DB_PATH, DB);
+  res.status(200).json({ ok: true, data: emp });
+});
 
+app.delete('/api/admin/employees/:id', authMiddleware, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  DB = readJsonSafe(DB_PATH, DB);
+  const before = DB.employees.length;
+  DB.employees = DB.employees.filter(e => e.id !== id);
+  if (DB.employees.length === before) {
+    return res.status(404).json({ ok: false, error: 'NotFound' });
+  }
+  writeJsonSafe(DB_PATH, DB);
+  res.status(200).json({ ok: true });
+});
+
+// ====== API – Admin: podsumowanie ======
+app.get('/api/admin/summary', authMiddleware, requireAdmin, (req, res) => {
+  DB = readJsonSafe(DB_PATH, DB);
+
+  const totalEmployees = DB.employees.length;
+  const activeEmployees = DB.employees.filter(e => e.active !== false).length;
+
+  // Zdarzenia z ostatnich 24h
+  const now = Date.now();
+  const dayAgo = now - 24 * 60 * 60 * 1000;
+  const recentEvents = DB.events.filter(ev => {
+    const t = new Date(ev.ts).getTime();
+    return Number.isFinite(t) && t >= dayAgo;
+  }).slice(-100); // ostatnie 100
+
+  res.status(200).json({
+    ok: true,
+    data: {
+      totalEmployees,
+      activeEmployees,
+      recentEvents
+    }
+  });
+});
+
+// POST /api/clock body: { employeeId: number, type?: 'in'|'out' }
+app.post('/api/clock', (req, res) => {
+  const { employeeId, type } = req.body || {};
+  if (!employeeId) {
+    return res.status(400).json({ ok: false, error: 'ValidationError', message: 'Wymagane: employeeId' });
+  }
+
+  DB = readJsonSafe(DB_PATH, DB);
+
+  const emp = DB.employees.find(e => e.id === Number(employeeId) && e.active !== false);
+  if (!emp) {
+    return res.status(404).json({ ok: false, error: 'EmployeeNotFound' });
+  }
+
+  let nextType = type;
+  if (nextType !== 'in' && nextType !== 'out') {
+    const last = [...DB.events].reverse().find(ev => ev.employeeId === emp.id);
+    nextType = last && last.type === 'in' ? 'out' : 'in';
+  }
+
+  const ev = {
+    id: DB.nextEventId++,
+    employeeId: emp.id,
+    type: nextType,
+    ts: new Date().toISOString()
+  };
+  DB.events.push(ev);
+  writeJsonSafe(DB_PATH, DB);
+
+  res.status(201).json({ ok: true, data: { employee: { id: emp.id, name: emp.name }, event: ev } });
+});
+
+// === ALIASY /admin/* (bez /api) ===
+
+// summary (alias do /api/admin/summary)
+app.get('/admin/summary', authMiddleware, requireAdmin, (req, res) => {
+  DB = readJsonSafe(DB_PATH, DB);
+  const totalEmployees = DB.employees.length;
+  const activeEmployees = DB.employees.filter(e => e.active !== false).length;
+  const now = Date.now();
+  const dayAgo = now - 24 * 60 * 60 * 1000;
+  const recentEvents = DB.events.filter(ev => {
+    const t = new Date(ev.ts).getTime();
+    return Number.isFinite(t) && t >= dayAgo;
+  }).slice(-100);
+  res.status(200).json({ ok: true, data: { totalEmployees, activeEmployees, recentEvents } });
+});
+
+// employees (alias do /api/admin/employees) — jeśli zakładka czasem uderza bez /api
+app.get('/admin/employees', authMiddleware, requireAdmin, (req, res) => {
+  DB = readJsonSafe(DB_PATH, DB);
+  res.status(200).json({
+    ok: true,
+    data: DB.employees.map(e => ({
+      id: e.id, name: e.name, cardUid: e.cardUid, active: e.active !== false
+    }))
+  });
+});
+
+// events/logs – przydatne dla zakładki „Zdarzenia” lub „Logi”
+app.get('/admin/events', authMiddleware, requireAdmin, (req, res) => {
+  DB = readJsonSafe(DB_PATH, DB);
+  res.status(200).json({ ok: true, data: DB.events.slice(-500) });
+});
+
+// settings – prosta odpowiedź, jeśli UI czegoś tam oczekuje
+app.get('/admin/settings', authMiddleware, requireAdmin, (req, res) => {
+  res.status(200).json({
+    ok: true,
+    data: {
+      version: '1.0',
+      clockMode: 'toggle', // in/out automatycznie
+    }
+  });
+});
+
+
+
+// ====== 404 JSON tylko dla /api ======
+app.use('/api', (req, res) => {
+  res.status(404).json({ ok: false, error: 'NotFound', path: req.originalUrl });
+});
+app.use('/admin', (req, res) => {
+  res.status(404).json({ ok: false, error: 'NotFound', path: req.originalUrl });
+});
+
+
+// ====== Globalny handler błędów (JSON) ======
+app.use((err, req, res, next) => {
+  console.error('API ERROR:', err);
+  const status = err?.status || 500;
+  res.status(status).json({
+    ok: false,
+    error: err?.name || 'ServerError',
+    message: err?.message || 'Internal error'
+  });
+});
+
+// ====== (Opcjonalnie) statyczne pliki SPA poza /api ======
+// Upewnij się, że NIGDY nie łapią /api/**
+// const publicDir = path.join(__dirname, 'public');
+// if (fs.existsSync(publicDir)) {
+//   app.use(express.static(publicDir));
+//   app.get('*', (req, res, next) => {
+//     if (req.path.startsWith('/api/')) return next();
+//     res.sendFile(path.join(publicDir, 'index.html'));
+//   });
+// }
+
+// ====== Start ======
 app.listen(PORT, () => {
-  console.log(`✓ Gateway on http://0.0.0.0:${PORT} -> ${UPSTREAM}`);
+  console.log(`[gateway] listening on http://localhost:${PORT}`);
 });
