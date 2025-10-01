@@ -49,7 +49,7 @@ class RemoteShiftRepository implements ShiftRepository {
   @override
   Future<Shift?> findActiveShiftForEmployee(int employeeId) async {
     final res = await http.get(
-      Uri.parse('$baseUrl/shifts?_sort=id&_order=desc'),
+      Uri.parse('$baseUrl/shifts?employee_id=$employeeId&_sort=id&_order=desc'),
     );
     if (res.statusCode != 200) {
       throw Exception('HTTP ${res.statusCode}: ${res.body}');
@@ -59,7 +59,7 @@ class RemoteShiftRepository implements ShiftRepository {
         .toList();
 
     for (final m in list) {
-      if (_asInt(m['employee_id']) != employeeId) continue;
+      // Usunięto if _asInt(m['employee_id']) != employeeId, bo API filtruje
       if (_isNullish(m['ended_at'])) {
         final started = _asDate(m['started_at']);
         if (started == null) continue;
@@ -104,7 +104,7 @@ class RemoteShiftRepository implements ShiftRepository {
   Future<void> endShiftByEmployee(int employeeId) async {
     // Znajdź aktywną zmianę dla pracownika, ustal „surowe” id (może być string) i zapatchuj
     final listRes = await http.get(
-      Uri.parse('$baseUrl/shifts?_sort=id&_order=desc'),
+      Uri.parse('$baseUrl/shifts?employee_id=$employeeId&_sort=id&_order=desc'),
     );
     if (listRes.statusCode != 200) {
       throw Exception('HTTP ${listRes.statusCode}: ${listRes.body}');
@@ -115,7 +115,7 @@ class RemoteShiftRepository implements ShiftRepository {
 
     Map<String, dynamic>? active;
     for (final m in list) {
-      if (_asInt(m['employee_id']) == employeeId && _isNullish(m['ended_at'])) {
+      if (_isNullish(m['ended_at'])) {
         active = m;
         break;
       }
